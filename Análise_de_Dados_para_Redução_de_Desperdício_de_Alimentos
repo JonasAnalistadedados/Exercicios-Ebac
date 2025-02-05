@@ -1,0 +1,135 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum, count, when, date_format, lit
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import LinearRegression
+from pyspark.sql.types import DateType
+import matplotlib.pyplot as plt
+import pandas as pd
+import plotly.express as px
+
+# Inicializando a sessão do Spark
+spark = SparkSession.builder \
+    .appName("Análise de Desperdício de Alimentos") \
+    .getOrCreate()
+
+# Simulando um conjunto de dados
+data = [
+    ("Supermercado A", "Pão", 10, "2023-10-01", "Validade expirada"),
+    ("Supermercado A", "Leite", 5, "2023-10-01", "Validade expirada"),
+    ("Restaurante B", "Arroz", 8, "2023-10-02", "Preparo em excesso"),
+    ("Restaurante B", "Carne", 3, "2023-10-02", "Preparo em excesso"),
+    ("Supermercado C", "Fruta", 15, "2023-10-03", "Danificado"),
+    ("Restaurante D", "Legumes", 7, "2023-10-03", "Preparo em excesso"),
+    ("Supermercado A", "Pão", 12, "2023-10-04", "Validade expirada"),
+    ("Restaurante B", "Arroz", 6, "2023-10-04", "Preparo em excesso"),
+    ("Supermercado C", "Leite", 4, "2023-10-05", "Validade expirada"),
+    ("Restaurante D", "Carne", 2, "2023-10-05", "Preparo em excesso"),
+]
+
+# Criando um DataFrame
+columns = ["Estabelecimento", "Alimento", "Quantidade", "Data", "Motivo"]
+df = spark.createDataFrame(data, columns)
+
+# Convertendo a coluna "Data" para o tipo Date
+df = df.withColumn("Data", col("Data").cast(DateType()))
+
+# Visualizando os dados
+df.show()
+
+# 1. Análise Temporal: Desperdício ao longo do tempo
+df_temporal = df.groupBy(date_format("Data", "yyyy-MM-dd").alias("Dia")) \
+    .agg(sum("Quantidade").alias("Total Desperdício")) \
+    .orderBy("Dia")
+
+df_temporal.show()
+
+# Gráfico de linha para análise temporal
+df_temporal_pd = df_temporal.toPandas()
+plt.figure(figsize=(10, 6))
+plt.plot(df_temporal_pd["Dia"], df_temporal_pd["Total Desperdício"], marker='o')
+plt.xlabel("Dia")
+plt.ylabel("Total Desperdício")
+plt.title("Desperdício de Alimentos ao Longo do Tempo")
+plt.xticks(rotation=45)
+plt.show()
+
+# 2. Análise por Categoria de Alimento
+# Adicionando uma coluna de categoria (exemplo simples)
+categorias = {
+    "Pão": "Perecível",
+    "Leite": "Perecível",
+    "Arroz": "Não Perecível",
+    "Carne": "Perecível",
+    "Fruta": "Perecível",
+    "Legumes": "Perecível"
+}
+
+df = df.withColumn("Categoria", when(col("Alimento") == "Pão", "Perecível")
+                                  .when(col("Alimento") == "Leite", "Perecível")
+                                  .when(col("Alimento") == "Arroz", "Não Perecível")
+                                  .when(col("Alimento") == "Carne", "Perecível")
+                                  .when(col("Alimento") == "Fruta", "Perecível")
+                                  .when(col("Alimento") == "Legumes", "Perecível")
+                                  .otherwise("Outros"))
+
+# Desperdício por categoria
+df_categoria = df.groupBy("Categoria") \
+    .agg(sum("Quantidade").alias("Total Desperdício")) \
+    .orderBy("Total Desperdício", ascending=False)
+
+df_categoria.show()
+
+# Gráfico de pizza para desperdício por categoria
+df_categoria_pd = df_categoria.toPandas()
+plt.figure(figsize=(8, 8))
+plt.pie(df_categoria_pd["Total Desperdício"], labels=df_categoria_pd["Categoria"], autopct='%1.1f%%')
+plt.title("Desperdício de Alimentos por Categoria")
+plt.show()
+
+# 3. Detecção de Outliers
+# Identificar estabelecimentos com desperdício acima da média
+media_desperdicio = df.select(avg("Quantidade")).collect()[0][0]
+df_outliers = df.filter(col("Quantidade") > media_desperdicio)
+
+print(f"Média de desperdício: {media_desperdicio}")
+df_outliers.show()
+
+# 4. Previsão de Desperdício (Regressão Linear Simples)
+# Preparando os dados para o modelo
+df_temporal = df_temporal.withColumn("DiaInt", col("Dia").substr(9, 2).cast("int"))
+
+# Criando um vetor de características
+assembler = VectorAssembler(inputCols=["DiaInt"], outputCol="features")
+df_temporal = assembler.transform(df_temporal)
+
+# Dividindo os dados em treino e teste
+train_data, test_data = df_temporal.randomSplit([0.8, 0.2])
+
+# Treinando o modelo de regressão linear
+lr = LinearRegression(featuresCol="features", labelCol="Total Desperdício")
+model = lr.fit(train_data)
+
+# Fazendo previsões
+predictions = model.transform(test_data)
+predictions.select("Dia", "Total Desperdício", "prediction").show()
+
+# 5. Dashboard Interativo com Plotly
+# Criando um DataFrame consolidado para o dashboard
+df_dashboard = df.groupBy("Estabelecimento", "Alimento", "Categoria", "Data") \
+    .agg(sum("Quantidade").alias("Total Desperdício")) \
+    .orderBy("Data")
+
+df_dashboard_pd = df_dashboard.toPandas()
+
+# Gráfico interativo de desperdício por estabelecimento
+fig = px.bar(df_dashboard_pd, x="Data", y="Total Desperdício", color="Estabelecimento",
+             title="Desperdício de Alimentos por Estabelecimento ao Longo do Tempo")
+fig.show()
+
+# Gráfico interativo de desperdício por categoria
+fig2 = px.pie(df_categoria_pd, values="Total Desperdício", names="Categoria",
+              title="Desperdício de Alimentos por Categoria")
+fig2.show()
+
+# Encerrando a sessão do Spark
+spark.stop()
